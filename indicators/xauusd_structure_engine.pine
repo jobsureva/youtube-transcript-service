@@ -1,0 +1,170 @@
+//@version=5
+// XAUUSD Structure Engine (GOLD-SE)
+//
+// Real-time market-structure trading, the way discretionary traders and EAs
+// actually determine direction: no prediction, pure reaction to structure.
+//
+//   - Confirmed swing highs/lows (pivots) build the structure map
+//   - The last unbroken swing high/low are the live decision levels
+//   - BUY  fires the moment a bar CLOSES above the last swing high
+//       * "CHoCH" (change of character) if structure was bearish -> reversal buy
+//       * "BOS"   (break of structure)  if structure was bullish -> continuation buy
+//   - SELL mirrors it on a close below the last swing low
+//
+// Every signal fires in real time at a tradeable price and never repaints.
+// The stop goes behind the opposite swing (structural stop) with an ATR cap,
+// targets are R-multiples. This will buy near bottoms and sell near tops --
+// AFTER the turn is confirmed by a broken level, which is the earliest moment
+// anyone (human or algo) can actually know it. Expect losses in chop; the
+// edge, if any, comes from riding the trends that follow real breaks.
+
+indicator("XAUUSD Structure Engine", shorttitle="GOLD-SE", overlay=true, max_labels_count=300, max_lines_count=300)
+
+// ---------------------------------------------------------------------------
+// Inputs
+// ---------------------------------------------------------------------------
+grpS = "Structure"
+pivLen     = input.int(5, "Swing strength (bars each side)", minval=1, group=grpS, tooltip="Bars required on both sides to confirm a swing point. Lower = faster structure, more noise; higher = slower, cleaner.")
+showPivots = input.bool(true, "Mark confirmed swing points", group=grpS)
+showLevels = input.bool(true, "Draw live decision levels", group=grpS)
+
+grpR = "Risk Levels"
+atrLen    = input.int(14, "ATR length", minval=1, group=grpR)
+slAtrMult = input.float(1.5, "Fallback stop (x ATR)", minval=0.1, step=0.1, group=grpR)
+maxSlAtr  = input.float(3.0, "Max structural stop distance (x ATR)", minval=0.5, step=0.25, group=grpR, tooltip="If the opposite swing is farther than this, the ATR fallback stop is used instead.")
+tp1RR     = input.float(1.0, "Take profit 1 (R multiple)", minval=0.1, step=0.1, group=grpR)
+tp2RR     = input.float(2.0, "Take profit 2 (R multiple)", minval=0.1, step=0.1, group=grpR)
+
+grpF = "Session Filter (UTC)"
+useSession = input.bool(false, "Trade only London + New York sessions", group=grpF, tooltip="Off by default: structure breaks matter at any hour. Turn on to skip Asian-session breaks.")
+londonSess = input.session("0700-1600", "London session", group=grpF)
+nySess     = input.session("1200-2100", "New York session", group=grpF)
+
+grpUi = "Display"
+showTrade = input.bool(true, "Show entry / SL / TP lines", group=grpUi)
+showDash  = input.bool(true, "Show dashboard", group=grpUi)
+showBg    = input.bool(true, "Tint background by structure", group=grpUi)
+
+// ---------------------------------------------------------------------------
+// Structure map
+// ---------------------------------------------------------------------------
+atr = ta.atr(atrLen)
+ph  = ta.pivothigh(high, pivLen, pivLen)
+pl  = ta.pivotlow(low, pivLen, pivLen)
+
+var float lastPH  = na   // last confirmed swing high (decision level for buys)
+var float lastPL  = na   // last confirmed swing low  (decision level for sells)
+var bool  phBroken = true
+var bool  plBroken = true
+var line  phLine  = na
+var line  plLine  = na
+
+if not na(ph)
+    lastPH   := ph
+    phBroken := false
+    if showLevels
+        phLine := line.new(bar_index - pivLen, ph, bar_index, ph, color=color.new(#ef5350, 30), width=1)
+if not na(pl)
+    lastPL   := pl
+    plBroken := false
+    if showLevels
+        plLine := line.new(bar_index - pivLen, pl, bar_index, pl, color=color.new(#26a69a, 30), width=1)
+
+// extend the live decision levels until they are broken
+if showLevels and not na(phLine) and not phBroken
+    line.set_x2(phLine, bar_index)
+if showLevels and not na(plLine) and not plBroken
+    line.set_x2(plLine, bar_index)
+
+inLondon  = not na(time(timeframe.period, londonSess, "Etc/UTC"))
+inNY      = not na(time(timeframe.period, nySess, "Etc/UTC"))
+inSession = not useSession or inLondon or inNY
+
+// ---------------------------------------------------------------------------
+// Real-time structure breaks (close through the level, confirmed bar only)
+// ---------------------------------------------------------------------------
+buyBreak  = not phBroken and not na(lastPH) and close > lastPH and inSession and barstate.isconfirmed
+sellBreak = not plBroken and not na(lastPL) and close < lastPL and inSession and barstate.isconfirmed and not buyBreak
+
+var int   structure = 0 // 1 bullish, -1 bearish
+var float entryP = na
+var float slP    = na
+var float tp1P   = na
+var float tp2P   = na
+var int   dir    = 0
+
+fmt(float p) => str.tostring(p, format.mintick)
+
+if buyBreak
+    kind = structure == -1 ? "CHoCH" : "BOS"
+    phBroken  := true
+    structure := 1
+    structuralStopOk = not na(lastPL) and lastPL < close and (close - lastPL) <= atr * maxSlAtr
+    entryP := close
+    slP    := structuralStopOk ? lastPL : close - atr * slAtrMult
+    risk   = entryP - slP
+    tp1P   := entryP + risk * tp1RR
+    tp2P   := entryP + risk * tp2RR
+    dir    := 1
+    label.new(bar_index, low, "BUY " + kind + "\nEntry " + fmt(entryP) + "\nSL " + fmt(slP) + "\nTP1 " + fmt(tp1P) + "\nTP2 " + fmt(tp2P), style=label.style_label_up, color=color.new(#26a69a, 10), textcolor=color.white, size=size.small)
+    alert("XAUUSD BUY " + kind + " | Entry " + fmt(entryP) + " | SL " + fmt(slP) + " | TP1 " + fmt(tp1P) + " | TP2 " + fmt(tp2P), alert.freq_once_per_bar_close)
+
+if sellBreak
+    kind = structure == 1 ? "CHoCH" : "BOS"
+    plBroken  := true
+    structure := -1
+    structuralStopOk = not na(lastPH) and lastPH > close and (lastPH - close) <= atr * maxSlAtr
+    entryP := close
+    slP    := structuralStopOk ? lastPH : close + atr * slAtrMult
+    risk   = slP - entryP
+    tp1P   := entryP - risk * tp1RR
+    tp2P   := entryP - risk * tp2RR
+    dir    := -1
+    label.new(bar_index, high, "SELL " + kind + "\nEntry " + fmt(entryP) + "\nSL " + fmt(slP) + "\nTP1 " + fmt(tp1P) + "\nTP2 " + fmt(tp2P), style=label.style_label_down, color=color.new(#ef5350, 10), textcolor=color.white, size=size.small)
+    alert("XAUUSD SELL " + kind + " | Entry " + fmt(entryP) + " | SL " + fmt(slP) + " | TP1 " + fmt(tp1P) + " | TP2 " + fmt(tp2P), alert.freq_once_per_bar_close)
+
+// retire trade lines once stop or final target is hit
+if dir == 1 and not buyBreak and (low <= slP or high >= tp2P)
+    dir := 0
+if dir == -1 and not sellBreak and (high >= slP or low <= tp2P)
+    dir := 0
+
+// ---------------------------------------------------------------------------
+// Plotting
+// ---------------------------------------------------------------------------
+plotshape(showPivots and not na(ph), "Swing high", style=shape.circle, location=location.abovebar, color=color.new(#ef5350, 50), size=size.tiny, offset=-pivLen)
+plotshape(showPivots and not na(pl), "Swing low",  style=shape.circle, location=location.belowbar, color=color.new(#26a69a, 50), size=size.tiny, offset=-pivLen)
+
+bgcolor(showBg and structure == 1 ? color.new(#26a69a, 94) : showBg and structure == -1 ? color.new(#ef5350, 94) : na)
+
+showLines = showTrade and dir != 0
+plot(showLines ? entryP : na, "Entry", style=plot.style_linebr, color=color.new(color.gray, 0), linewidth=1)
+plot(showLines ? slP    : na, "Stop",  style=plot.style_linebr, color=color.new(#ef5350, 0),   linewidth=1)
+plot(showLines ? tp1P   : na, "TP1",   style=plot.style_linebr, color=color.new(#26a69a, 40),  linewidth=1)
+plot(showLines ? tp2P   : na, "TP2",   style=plot.style_linebr, color=color.new(#26a69a, 0),   linewidth=1)
+
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+var table dash = table.new(position.top_right, 2, 5, border_width=1)
+if showDash and barstate.islast
+    hdrBg = color.new(color.gray, 70)
+    upBg  = color.new(#26a69a, 70)
+    dnBg  = color.new(#ef5350, 70)
+    neuBg = color.new(color.gray, 85)
+    table.cell(dash, 0, 0, "GOLD-SE", bgcolor=hdrBg, text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 0, syminfo.ticker, bgcolor=hdrBg, text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 1, "Structure", bgcolor=neuBg, text_size=size.small)
+    table.cell(dash, 1, 1, structure == 1 ? "BULLISH" : structure == -1 ? "BEARISH" : "FORMING", bgcolor=structure == 1 ? upBg : structure == -1 ? dnBg : neuBg, text_size=size.small)
+    table.cell(dash, 0, 2, "Buy above", bgcolor=neuBg, text_size=size.small)
+    table.cell(dash, 1, 2, phBroken or na(lastPH) ? "—" : fmt(lastPH), bgcolor=upBg, text_size=size.small)
+    table.cell(dash, 0, 3, "Sell below", bgcolor=neuBg, text_size=size.small)
+    table.cell(dash, 1, 3, plBroken or na(lastPL) ? "—" : fmt(lastPL), bgcolor=dnBg, text_size=size.small)
+    table.cell(dash, 0, 4, "Session", bgcolor=neuBg, text_size=size.small)
+    table.cell(dash, 1, 4, inSession ? "ACTIVE" : "OFF-HOURS", bgcolor=inSession ? upBg : neuBg, text_size=size.small)
+
+// ---------------------------------------------------------------------------
+// Alert conditions (for the alert dialog)
+// ---------------------------------------------------------------------------
+alertcondition(buyBreak,  "Structure BUY",  "XAUUSD structure BUY (GOLD-SE)")
+alertcondition(sellBreak, "Structure SELL", "XAUUSD structure SELL (GOLD-SE)")
