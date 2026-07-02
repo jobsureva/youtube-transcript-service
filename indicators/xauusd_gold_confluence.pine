@@ -1,0 +1,182 @@
+//@version=5
+// XAUUSD Gold Confluence Signals
+// A multi-confluence buy/sell indicator designed for gold (XAUUSD).
+//
+// Signal logic (all conditions must align):
+//   1. Trend      : Fast EMA vs Slow EMA on the chart timeframe
+//   2. HTF filter : Same EMA trend on a higher timeframe (non-repainting, uses confirmed bars)
+//   3. Pullback   : Price recently pulled back into the fast EMA (no chasing extended moves)
+//   4. Momentum   : RSI crossing back through the midline in the trend direction
+//   5. Candle     : Signal bar closes in the direction of the trade
+//   6. Session    : Optional London / New York session filter (gold's high-liquidity hours)
+//   7. Cooldown   : Minimum bars between signals to avoid signal clusters
+//
+// Signals are evaluated on CONFIRMED bar closes only -> they do not repaint.
+// Stop loss and take profits are ATR-based and printed on the chart and in alerts.
+
+indicator("XAUUSD Gold Confluence Signals", shorttitle="GOLD-CS", overlay=true, max_labels_count=200)
+
+// ---------------------------------------------------------------------------
+// Inputs
+// ---------------------------------------------------------------------------
+grpTrend = "Trend Engine"
+emaFastLen  = input.int(21,  "Fast EMA length",  minval=1, group=grpTrend)
+emaSlowLen  = input.int(55,  "Slow EMA length",  minval=2, group=grpTrend)
+useHtf      = input.bool(true, "Use higher-timeframe trend filter", group=grpTrend)
+htfTf       = input.timeframe("240", "Higher timeframe", group=grpTrend, tooltip="240 = 4H. Trade only in the direction of this timeframe's EMA trend.")
+
+grpMom = "Momentum / Entry"
+rsiLen           = input.int(14, "RSI length", minval=2, group=grpMom)
+rsiMidline       = input.float(50, "RSI trigger line", minval=10, maxval=90, group=grpMom)
+pullbackLookback = input.int(8, "Pullback lookback (bars)", minval=1, group=grpMom, tooltip="Price must have touched the fast EMA within this many bars for a signal to fire.")
+cooldownBars     = input.int(10, "Min bars between signals", minval=0, group=grpMom)
+
+grpRisk = "Risk Levels (ATR-based)"
+atrLen  = input.int(14,   "ATR length", minval=1, group=grpRisk)
+slMult  = input.float(1.5, "Stop loss (x ATR)", minval=0.1, step=0.1, group=grpRisk)
+tp1RR   = input.float(1.0, "Take profit 1 (R multiple)", minval=0.1, step=0.1, group=grpRisk)
+tp2RR   = input.float(2.0, "Take profit 2 (R multiple)", minval=0.1, step=0.1, group=grpRisk)
+
+grpSess = "Session Filter (UTC)"
+useSession = input.bool(true, "Trade only London + New York sessions", group=grpSess)
+londonSess = input.session("0700-1600", "London session", group=grpSess)
+nySess     = input.session("1200-2100", "New York session", group=grpSess)
+
+grpUi = "Display"
+showLevels = input.bool(true, "Show entry / SL / TP lines", group=grpUi)
+showDash   = input.bool(true, "Show dashboard", group=grpUi)
+showBg     = input.bool(true, "Tint background by trend", group=grpUi)
+
+// ---------------------------------------------------------------------------
+// Trend
+// ---------------------------------------------------------------------------
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+trendUp   = emaFast > emaSlow
+trendDown = emaFast < emaSlow
+
+// Higher-timeframe trend using the LAST CONFIRMED HTF bar (no repainting / no lookahead)
+htfFast = request.security(syminfo.tickerid, htfTf, ta.ema(close, emaFastLen)[1], barmerge.gaps_off, barmerge.lookahead_off)
+htfSlow = request.security(syminfo.tickerid, htfTf, ta.ema(close, emaSlowLen)[1], barmerge.gaps_off, barmerge.lookahead_off)
+htfUp   = not useHtf or htfFast > htfSlow
+htfDown = not useHtf or htfFast < htfSlow
+
+// ---------------------------------------------------------------------------
+// Momentum, pullback, session
+// ---------------------------------------------------------------------------
+rsi     = ta.rsi(close, rsiLen)
+momBuy  = ta.crossover(rsi, rsiMidline)
+momSell = ta.crossunder(rsi, rsiMidline)
+
+pullbackBuy  = ta.barssince(low  <= emaFast) <= pullbackLookback
+pullbackSell = ta.barssince(high >= emaFast) <= pullbackLookback
+
+inLondon  = not na(time(timeframe.period, londonSess, "Etc/UTC"))
+inNY      = not na(time(timeframe.period, nySess, "Etc/UTC"))
+inSession = not useSession or inLondon or inNY
+
+// ---------------------------------------------------------------------------
+// Signals (confirmed bars only -> non-repainting)
+// ---------------------------------------------------------------------------
+var int lastSignalBar = -99999
+canSignal = bar_index - lastSignalBar >= cooldownBars
+
+rawBuy  = trendUp   and htfUp   and pullbackBuy  and momBuy  and close > open and inSession
+rawSell = trendDown and htfDown and pullbackSell and momSell and close < open and inSession
+
+buySignal  = rawBuy  and canSignal and barstate.isconfirmed
+sellSignal = rawSell and not rawBuy and canSignal and barstate.isconfirmed
+
+if buySignal or sellSignal
+    lastSignalBar := bar_index
+
+// ---------------------------------------------------------------------------
+// Trade levels
+// ---------------------------------------------------------------------------
+atr = ta.atr(atrLen)
+
+var float entryP = na
+var float slP    = na
+var float tp1P   = na
+var float tp2P   = na
+var int   dir    = 0 // 1 = long active, -1 = short active, 0 = flat
+
+riskAmt = atr * slMult
+
+if buySignal
+    entryP := close
+    slP    := close - riskAmt
+    tp1P   := close + riskAmt * tp1RR
+    tp2P   := close + riskAmt * tp2RR
+    dir    := 1
+
+if sellSignal
+    entryP := close
+    slP    := close + riskAmt
+    tp1P   := close - riskAmt * tp1RR
+    tp2P   := close - riskAmt * tp2RR
+    dir    := -1
+
+// Retire the level lines once the stop or final target is hit
+if dir == 1 and not buySignal and (low <= slP or high >= tp2P)
+    dir := 0
+if dir == -1 and not sellSignal and (high >= slP or low <= tp2P)
+    dir := 0
+
+// ---------------------------------------------------------------------------
+// Plotting
+// ---------------------------------------------------------------------------
+colBull = color.new(#26a69a, 0)
+colBear = color.new(#ef5350, 0)
+
+plot(emaFast, "Fast EMA", color=color.new(color.orange, 0), linewidth=2)
+plot(emaSlow, "Slow EMA", color=color.new(color.blue, 0), linewidth=2)
+
+bgcolor(showBg and trendUp and htfUp ? color.new(#26a69a, 94) : showBg and trendDown and htfDown ? color.new(#ef5350, 94) : na)
+
+plotshape(buySignal,  "Buy",  style=shape.triangleup,   location=location.belowbar, color=colBull, size=size.small, text="BUY")
+plotshape(sellSignal, "Sell", style=shape.triangledown, location=location.abovebar, color=colBear, size=size.small, text="SELL")
+
+showLines = showLevels and dir != 0
+plot(showLines ? entryP : na, "Entry", style=plot.style_linebr, color=color.new(color.gray, 0),  linewidth=1)
+plot(showLines ? slP    : na, "Stop",  style=plot.style_linebr, color=colBear,                   linewidth=1)
+plot(showLines ? tp1P   : na, "TP1",   style=plot.style_linebr, color=color.new(#26a69a, 40),    linewidth=1)
+plot(showLines ? tp2P   : na, "TP2",   style=plot.style_linebr, color=colBull,                   linewidth=1)
+
+fmt(float p) => str.tostring(p, format.mintick)
+
+if buySignal
+    label.new(bar_index, low, "BUY\nEntry " + fmt(entryP) + "\nSL " + fmt(slP) + "\nTP1 " + fmt(tp1P) + "\nTP2 " + fmt(tp2P), style=label.style_label_up, color=color.new(#26a69a, 10), textcolor=color.white, size=size.small)
+if sellSignal
+    label.new(bar_index, high, "SELL\nEntry " + fmt(entryP) + "\nSL " + fmt(slP) + "\nTP1 " + fmt(tp1P) + "\nTP2 " + fmt(tp2P), style=label.style_label_down, color=color.new(#ef5350, 10), textcolor=color.white, size=size.small)
+
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+var table dash = table.new(position.top_right, 2, 5, border_width=1)
+if showDash and barstate.islast
+    hdrBg  = color.new(color.gray, 70)
+    upBg   = color.new(#26a69a, 70)
+    dnBg   = color.new(#ef5350, 70)
+    neuBg  = color.new(color.gray, 85)
+    table.cell(dash, 0, 0, "GOLD-CS",   bgcolor=hdrBg, text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 0, syminfo.ticker, bgcolor=hdrBg, text_color=color.white, text_size=size.small)
+    table.cell(dash, 0, 1, "Chart trend", bgcolor=neuBg, text_size=size.small)
+    table.cell(dash, 1, 1, trendUp ? "UP" : trendDown ? "DOWN" : "FLAT", bgcolor=trendUp ? upBg : trendDown ? dnBg : neuBg, text_size=size.small)
+    table.cell(dash, 0, 2, "HTF trend (" + htfTf + ")", bgcolor=neuBg, text_size=size.small)
+    table.cell(dash, 1, 2, htfFast > htfSlow ? "UP" : "DOWN", bgcolor=htfFast > htfSlow ? upBg : dnBg, text_size=size.small)
+    table.cell(dash, 0, 3, "RSI", bgcolor=neuBg, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(rsi, "#.#"), bgcolor=rsi > rsiMidline ? upBg : dnBg, text_size=size.small)
+    table.cell(dash, 0, 4, "Session", bgcolor=neuBg, text_size=size.small)
+    table.cell(dash, 1, 4, inSession ? "ACTIVE" : "OFF-HOURS", bgcolor=inSession ? upBg : neuBg, text_size=size.small)
+
+// ---------------------------------------------------------------------------
+// Alerts (real-time, fire once per confirmed bar close)
+// ---------------------------------------------------------------------------
+alertcondition(buySignal,  "Gold BUY signal",  "XAUUSD BUY signal (GOLD-CS)")
+alertcondition(sellSignal, "Gold SELL signal", "XAUUSD SELL signal (GOLD-CS)")
+
+if buySignal
+    alert("XAUUSD BUY | Entry " + fmt(entryP) + " | SL " + fmt(slP) + " | TP1 " + fmt(tp1P) + " | TP2 " + fmt(tp2P), alert.freq_once_per_bar_close)
+if sellSignal
+    alert("XAUUSD SELL | Entry " + fmt(entryP) + " | SL " + fmt(slP) + " | TP1 " + fmt(tp1P) + " | TP2 " + fmt(tp2P), alert.freq_once_per_bar_close)
