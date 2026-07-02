@@ -5,23 +5,34 @@ with an entry price, ATR-based stop loss, and two take-profit targets, plus
 real-time alerts. Signals are evaluated on confirmed bar closes only, so they
 **never repaint** — what you see in history is what you would have gotten live.
 
-## How it works
+## How it works (v2)
 
-A signal only fires when all of these line up:
+**Bias** — all three must agree before any signal can fire:
 
-| # | Filter | What it checks |
-|---|--------|----------------|
-| 1 | Chart trend | Fast EMA (21) above/below Slow EMA (55) |
-| 2 | Higher-timeframe trend | Same EMA trend on the 4H (configurable), using confirmed bars only |
-| 3 | Pullback | Price touched the fast EMA within the last 8 bars — you enter on retracements, not chases |
-| 4 | Momentum | RSI (14) crossing back through 50 in the trend direction |
-| 5 | Candle confirmation | The signal bar closes in the trade direction |
-| 6 | Session | Inside London (07:00–16:00 UTC) or New York (12:00–21:00 UTC) — gold's high-liquidity hours |
-| 7 | Cooldown | At least 10 bars since the last signal, to avoid clusters |
+| Filter | What it checks |
+|--------|----------------|
+| Chart trend | Fast EMA (21) above/below Slow EMA (55) |
+| HTF bias | 1H close above/below the 1H EMA(50), confirmed bars only. This reacts within a few bars of a real trend turn — v1 used a 4H EMA cross, which lagged a full session and blocked entire intraday trends. |
+| Chop guard | EMAs separated by at least 0.1 × ATR — no signals in flat chop |
 
-Every signal prints a label with **Entry / SL / TP1 / TP2**. The stop is
-1.5 × ATR(14); TP1 is 1R and TP2 is 2R by default. A dashboard in the top-right
-shows current trend, HTF trend, RSI, and session status at a glance.
+**Entries** — two triggers per direction, so a sustained trend keeps producing
+signals instead of relying on a one-time RSI crossover:
+
+- **A. Pullback resumption** — price touched the fast EMA within the last 8
+  bars and now closes back through it in the trend direction with RSI on side.
+- **B. Continuation breakout** — close beyond the highest high / lowest low of
+  the prior 10 bars with RSI momentum confirming.
+
+**Guards** — both entry types are vetoed when the move is already exhausted:
+no sells when RSI < 25 or price is stretched more than 3 × ATR below the slow
+EMA (mirrored for buys), no signals outside London (07:00–16:00 UTC) / New York
+(12:00–21:00 UTC), and a 6-bar cooldown between signals. These guards are what
+stop the indicator from shorting V-bottoms after a capitulation drop.
+
+Every signal prints a label with the entry type and **Entry / SL / TP1 / TP2**.
+The stop is 1.5 × ATR(14); TP1 is 1R and TP2 is 2R by default. The dashboard
+shows chart trend, HTF bias, which side signals are currently allowed on
+(BUYS ONLY / SELLS ONLY / STAND ASIDE), RSI, and session status.
 
 ## Installation
 
@@ -42,8 +53,9 @@ arrives the moment the signal bar closes — that close price is your entry zone
 
 ## Recommended usage
 
-- **Timeframes:** 15m or 1H for signals, with the HTF filter on 4H (default).
-  On 15m charts you'll get a few signals per week; on 5m more signals but more noise.
+- **Timeframes:** 15m or 1H for signals, with the HTF bias on 1H (default) —
+  use 4H bias only for 1H+ charts. On 15m expect several signals per week;
+  on 5m more signals but more noise.
 - **Risk per trade:** 1% of account or less. Position size = (account × 1%) ÷ (entry − stop distance in $).
 - **Trade management:** take half off at TP1 and move the stop to breakeven; let the rest run to TP2.
 - **Skip signals** right before major USD news (NFP, CPI, FOMC) — gold spikes through stops during releases.
@@ -73,8 +85,10 @@ actually work:
 | Setting | Default | Effect of changing it |
 |---------|---------|----------------------|
 | Fast/Slow EMA | 21 / 55 | Shorter = more signals, more noise |
-| Higher timeframe | 240 (4H) | Higher = fewer, stronger signals |
+| Higher timeframe / HTF EMA | 60 (1H) / 50 | Higher TF or longer EMA = fewer, stronger signals but slower to flip after reversals |
+| Breakout lookback | 10 bars | Larger = only stronger breakouts qualify as continuation entries |
+| Max distance from slow EMA | 3.0 × ATR | Lower = stricter exhaustion guard, skips more late entries |
 | Stop loss (× ATR) | 1.5 | Wider = fewer stop-outs, larger risk per trade |
 | Pullback lookback | 8 bars | Larger = more signals allowed after a pullback |
-| Min bars between signals | 10 | Lower = more frequent signals |
+| Min bars between signals | 6 | Lower = more frequent signals |
 | Session filter | On | Turn off to also trade the Asian session (thinner, choppier for gold) |
