@@ -1,0 +1,43 @@
+//@version=5
+// Pivot Reversal Signals — Honesty Demo
+//
+// This reproduces the "perfect buy at every bottom, sell at every top" look
+// used in social-media indicator ads (GainzAlgo-style). It is NOT a trading
+// edge — it is a demonstration of HOW that look is manufactured.
+//
+// The trick: a swing low/high can only be confirmed `strength` bars AFTER it
+// happens. Pine allows drawing the label back in time at the exact extreme,
+// so on HISTORICAL bars (or in Bar Replay videos) every signal sits perfectly
+// on the turn. Live, the signal only becomes known `strength` bars later —
+// after the move you wanted has already left.
+//
+// Turn "Show when the signal was ACTUALLY known" on (default) and you'll see
+// a second, gray marker on the bar where the label really appeared. Watch it
+// live or step through Bar Replay yourself: the pretty label is hindsight,
+// the gray marker is reality.
+
+indicator("Pivot Reversal Signals (Honesty Demo)", shorttitle="PIVOT-DEMO", overlay=true, max_labels_count=500)
+
+strength  = input.int(5, "Pivot strength (bars each side)", minval=1, tooltip="A swing point needs this many bars on BOTH sides. Larger = prettier historical signals = MORE hindsight delay live.")
+showTruth = input.bool(true, "Show when the signal was ACTUALLY known")
+showRisk  = input.bool(true, "Show TP/SL text on labels (cosmetic, like the ads)")
+
+atr = ta.atr(14)
+fmt(float p) => str.tostring(p, format.mintick)
+
+pl = ta.pivotlow(low, strength, strength)
+ph = ta.pivothigh(high, strength, strength)
+
+if not na(pl)
+    // The "perfect" label, drawn `strength` bars in the past at the exact low —
+    // this is the entire secret of the ads.
+    txt = showRisk ? "BUY\nTP: " + fmt(pl + atr * 2) + "\nSL: " + fmt(pl - atr) : "BUY"
+    label.new(bar_index - strength, pl, txt, style=label.style_label_up, color=color.new(#22c55e, 0), textcolor=color.white, size=size.normal)
+    if showTruth
+        label.new(bar_index, low - atr, "signal only knowable HERE\n(" + str.tostring(strength) + " bars after the low)", style=label.style_label_up, color=color.new(color.gray, 40), textcolor=color.white, size=size.tiny)
+
+if not na(ph)
+    txt = showRisk ? "SELL\nTP: " + fmt(ph - atr * 2) + "\nSL: " + fmt(ph + atr) : "SELL"
+    label.new(bar_index - strength, ph, txt, style=label.style_label_down, color=color.new(#ef4444, 0), textcolor=color.white, size=size.normal)
+    if showTruth
+        label.new(bar_index, high + atr, "signal only knowable HERE\n(" + str.tostring(strength) + " bars after the high)", style=label.style_label_down, color=color.new(color.gray, 40), textcolor=color.white, size=size.tiny)
